@@ -15,6 +15,7 @@ from PIL import Image
 import io
 
 import rkllama.config
+from .request_options import validate_request_options
 
 try:
     from pydantic import BaseModel, ValidationError, create_model
@@ -295,6 +296,7 @@ def openai_to_ollama_chat_request(openai_payload: dict) -> dict:
     Returns:
         dict: Ollama-compatible request payload.
     """
+    openai_payload = validate_request_options(openai_payload, openai=True, chat=True)
     messages = openai_payload.get("messages", [])
     model = openai_payload.get("model", "llama3")
     stream = openai_payload.get("stream", False)
@@ -306,28 +308,9 @@ def openai_to_ollama_chat_request(openai_payload: dict) -> dict:
         "stream": stream,
     }
 
-    # Supported Ollama options from OpenAI fields
-    supported_option_mappings = {
-        "temperature": "temperature",
-        "top_p": "top_p",
-        "top_k": "top_k",
-        "presence_penalty": "presence_penalty",
-        "frequency_penalty": "frequency_penalty",
-        "stop": "stop",
-        "max_tokens": "max_new_tokens",
-        "max_completion_tokens": "max_new_tokens",
-        "seed": "seed",
-        "logit_bias": "logit_bias",  # If supported
-    }
+    ollama_payload["options"] = openai_payload["options"]
 
-    for openai_key, ollama_key in supported_option_mappings.items():
-        if openai_key in openai_payload:
-            ollama_payload.setdefault("options", {})[ollama_key] = openai_payload[openai_key]
-
-    # Handle tool_choice, tools, functions
-    # Ollama currently has no native tool/function support (like OpenAI tool-calling)
-    # But we include them for forward compatibility if needed by custom handler
-    for passthrough_key in ["tools", "tool_choice", "functions", "function_call", "response_format", "n"]:
+    for passthrough_key in ["tools", "system", "images", "format", "enable_thinking"]:
         if passthrough_key in openai_payload:
             ollama_payload[passthrough_key] = openai_payload[passthrough_key]
 
@@ -366,6 +349,7 @@ def openai_to_ollama_generate_request(openai_payload: dict) -> dict:
     Returns:
         dict: Ollama-compatible /api/generate request payload.
     """
+    openai_payload = validate_request_options(openai_payload, openai=True, chat=False)
     # Handle "prompt": could be a string or an array
     prompt = openai_payload.get("prompt", "")
     if isinstance(prompt, list):
@@ -383,25 +367,9 @@ def openai_to_ollama_generate_request(openai_payload: dict) -> dict:
         "stream": stream,
     }
 
-    # Supported Ollama option mappings
-    supported_option_mappings = {
-        "temperature": "temperature",
-        "top_p": "top_p",
-        "top_k": "top_k",
-        "presence_penalty": "presence_penalty",
-        "frequency_penalty": "frequency_penalty",
-        "stop": "stop",
-        "max_tokens": "max_new_tokens",  # OpenAI max_tokens => Ollama max_new_tokens
-        "seed": "seed",
-        "logit_bias": "logit_bias",  # If supported by your Ollama deployment
-    }
+    ollama_payload["options"] = openai_payload["options"]
 
-    for openai_key, ollama_key in supported_option_mappings.items():
-        if openai_key in openai_payload:
-            ollama_payload.setdefault("options", {})[ollama_key] = openai_payload[openai_key]
-
-    # Pass through extra non-standard fields for forward compatibility (optional)
-    for passthrough_key in ["n", "best_of", "logprobs", "echo", "user"]:
+    for passthrough_key in ["system", "format", "enable_thinking"]:
         if passthrough_key in openai_payload:
             ollama_payload[passthrough_key] = openai_payload[passthrough_key]
 
