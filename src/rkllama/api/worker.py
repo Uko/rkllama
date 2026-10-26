@@ -217,6 +217,16 @@ def run_translation_generator(model_runtime, model_input):
     
 
 # RKLLM Worker 
+def abort_and_join(model,thread,timeout=30):
+    """Cover native-entry races by retrying abort until the wrapper is quiescent."""
+    deadline=time.monotonic()+timeout
+    while thread.is_alive():
+        model.abort()
+        thread.join(timeout=min(0.1,max(0,deadline-time.monotonic())))
+        if time.monotonic()>=deadline:return not thread.is_alive()
+    return True
+
+
 def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, model_dir, options=None, lora_model_path = None, prompt_cache_path = None, base_domain_id = 0):
     # Die with the parent to prevent NPU memory leaks on parent crash
     _set_parent_death_signal()
@@ -232,6 +242,8 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
     # Define the model used by the worker
     try:
         model_rkllm = RKLLM(callback, model_path, model_dir, options, lora_model_path, prompt_cache_path, base_domain_id)
+        if getattr(model_rkllm,"prefix_cache",None):
+            model_rkllm.prefix_cache.cancelled=lambda:abort_flag.value
     
         # Announce the creation of the RKLLM model failed
         result_queue.put({"status": WORKER_TASK_FINISHED, "context_tokens": int(model_rkllm.rkllm_param.max_context_len)})
@@ -310,9 +322,8 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                 if abort_flag.value:
                     # Abort the current inference of the model
                     logger.info(f"Aborting inference for model {name}...")
-                    model_rkllm.abort()
-                    thread_model.join(timeout=30)
-                    if thread_model.is_alive():
+                    abort_flag.value=True
+                    if not abort_and_join(model_rkllm,thread_model):
                         # Do not let another task overlap a still-running native
                         # call. Exit the worker so the parent reaps/reloads it.
                         raise SystemExit("Native abort did not stop inference")
@@ -334,17 +345,30 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                     # them now, before FINISHED, never in the next request.
                     while global_text:
                         child_conn.send(global_text.pop(0))
+                    if getattr(getattr(model_rkllm,"prefix_cache",None),"tainted",False) is True:
+                        raise SystemExit("Native cache state could not be reset safely")
                     if native_failure or len(global_metrics) != 4:
                         raise RuntimeError("Native inference failed without valid completion metrics")
                     # Get the metrics of the inference
                     prompt_token_count = global_metrics[0]
                     token_count = global_metrics[1]
+                    visible_token_count = token_count
+                    prefix_cache = getattr(model_rkllm,"prefix_cache",None)
+                    prime = getattr(prefix_cache,"last_priming_metrics",[])
+                    if isinstance(prime,(list,tuple)) and len(prime) == 4:
+                        # Include work consumed by hidden prefix priming, just as
+                        # the validated adapter includes discarded candidates.
+                        prompt_token_count += prime[0]
+                        token_count += prime[1]
                     prompt_eval = global_metrics[2] * 1000000  if global_metrics[2] is not None else 0
                     eval = global_metrics[3] * 1000000 if global_metrics[3] is not None else 0
+                    if isinstance(prime,(list,tuple)) and len(prime) == 4:
+                        prompt_eval += prime[2] * 1000000
+                        eval += prime[3] * 1000000
                 
                 # Send final signal of the inference
                 limit = int((options or {}).get("max_new_tokens", rkllama.config.get("model", "default_max_new_tokens")))
-                finish = "length" if max(token_count, callback_state.global_generation_steps) >= limit else "stop"
+                finish = "length" if max(visible_token_count, callback_state.global_generation_steps) >= limit else "stop"
                 child_conn.send((WORKER_TASK_FINISHED,prompt_token_count, token_count, prompt_eval, eval, finish))
 
                 # Close the connection
@@ -391,11 +415,13 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
 
         except Exception as e:
             logger.error(f"Failed executing task the worker for model '{name}': {str(e)}")
+            if getattr(getattr(model_rkllm,"prefix_cache",None),"tainted",False) is True:
+                raise SystemExit("Native cache state could not be reset safely")
             if task == WORKER_TASK_INFERENCE and thread_model.is_alive():
-                model_rkllm.abort()
-                thread_model.join(timeout=30)
-                if thread_model.is_alive():
+                abort_flag.value=True
+                if not abort_and_join(model_rkllm,thread_model):
                     raise SystemExit("Failed inference did not stop")
+                abort_flag.value=False
             child_conn.send({"error": {"type": "server_error", "code": "native_inference_error", "message": "Native inference failed"}})
 
             # Close the connection

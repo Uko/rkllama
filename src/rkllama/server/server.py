@@ -1031,18 +1031,23 @@ def delete_model_ollama():
 
 @app.route('/api/generate', methods=['POST'])
 @app.route('/v1/completions', methods=['POST'])
-def generate_ollama():
+def generate_ollama(data_override=None):
     
     is_openai_request = request.path.startswith('/v1/completions')
 
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(force=True) if data_override is None else data_override
         if not isinstance(data, dict):
             raise RequestOptionError(None, "Request body must be a JSON object")
 
         # Check if the model is GGFU to forward the request to the corresponding llama.cpp worker       
         if is_gguf_model(data.get('model')):
             return forward_request_to_llama_cpp_worker(is_openai_request,request)
+
+        if is_openai_request and data_override is None:
+            from rkllama.api.validated_completion import needs_validation,validated_completion
+            if needs_validation(data):
+                return validated_completion(data,lambda inner: generate_ollama(data_override=inner),is_chat=False)
 
         if is_openai_request:
            if DEBUG_MODE:
@@ -1115,12 +1120,12 @@ def generate_ollama():
 # Also update the chat endpoint for consistency
 @app.route('/api/chat', methods=['POST'])
 @app.route('/v1/chat/completions', methods=['POST'])
-def chat_ollama():
+def chat_ollama(data_override=None):
     
     is_openai_request = request.path.startswith('/v1/chat/completions')
         
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(force=True) if data_override is None else data_override
         if not isinstance(data, dict):
             raise RequestOptionError(None, "Request body must be a JSON object")
         
@@ -1128,6 +1133,11 @@ def chat_ollama():
         if is_gguf_model(data.get('model')):
             return forward_request_to_llama_cpp_worker(is_openai_request , request)
             
+        if is_openai_request and data_override is None:
+            from rkllama.api.validated_completion import needs_validation,validated_completion
+            if needs_validation(data):
+                return validated_completion(data,lambda inner: chat_ollama(data_override=inner),is_chat=True)
+
         if is_openai_request:
            if DEBUG_MODE:
               logger.debug(f"API OpenAI chat request data: {data}")

@@ -1,6 +1,7 @@
 """Explicit request-option contract for the RKLLM backend (not llama.cpp)."""
 import copy
 import math
+import json
 
 
 SAMPLING_OPTIONS = frozenset({
@@ -8,6 +9,18 @@ SAMPLING_OPTIONS = frozenset({
     "repeat_penalty", "mirostat", "mirostat_tau", "mirostat_eta", "max_new_tokens",
 })
 TOKEN_ALIASES = {"max_tokens": "max_new_tokens", "max_completion_tokens": "max_new_tokens"}
+
+
+def strict_json(text,**kwargs):
+    def invalid(value):raise ValueError('Non-JSON numeric value')
+    def pairs(items):
+        out={}
+        for key,value in items:
+            if key in out:raise ValueError('Duplicate JSON key')
+            out[key]=value
+        return out
+    return json.loads(text,parse_constant=invalid,object_pairs_hook=pairs,**kwargs)
+
 
 
 def validate_sampling_options(options, prefix="options."):

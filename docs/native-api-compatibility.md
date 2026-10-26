@@ -15,8 +15,9 @@ It does not select a production backend, change weights, or enlarge resource lim
   counters, once in a final empty-choices event before `[DONE]`. Other events have
   null usage; unrequested usage is omitted. A stream uses one ID and creation time.
 - Tool choice supports `auto` and `none`. Automatic calls remain model-generated,
-  not guaranteed. `none` removes tool definitions from the prompt. Forced/named
-  selection and strict tool schemas remain explicit HTTP 400 errors.
+  not guaranteed. `none` removes tool definitions from the prompt. OpenAI
+  required/named choices and strict tool definitions use the bounded validation
+  adapter described below; these are not native forcing controls.
 - OpenAI tool arguments are JSON strings, including in streamed responses, and
   conversion does not mutate the underlying Ollama response.
 - Qwen3.5 function/parameter blocks and older JSON calls share declared-name
@@ -28,8 +29,9 @@ It does not select a production backend, change weights, or enlarge resource lim
 - Tool-enabled streams buffer until the complete response is parsed. This adds
   latency for ordinary text when tools are supplied, but avoids leaking partial
   tool markup as content. Tools are returned to the caller, never executed here.
-- Strict JSON Schema/constrained decoding remains unsupported, not approximated
-  by accepting an ignored option or silently retrying unvalidated generations.
+- Native constrained decoding remains unavailable. OpenAI JSON Schema requests
+  use explicit post-generation validation, with at most two candidates; no invalid
+  candidate is streamed as a successful response.
 
 ## Inference isolation
 
@@ -50,11 +52,50 @@ callback counts. The SDK does not expose a separate finish-reason field here.
 Capacity checks use the context size reported by the loaded native worker, not
 an edited Modelfile that has not yet been reloaded.
 
-Automatic disk prompt-cache reuse is disabled for stateless chat. The previous
-cache identity used only the first two messages and the message count, not the
-complete history, tool definitions, or thinking settings. Safe exact-prefix
-reuse needs a separate implementation and architecture-specific validation.
-This change makes no repeated-prompt speedup claim and does not delete old caches.
+Automatic prefix reuse remains **off by default**. Set
+`RKLLAMA_EXPERIMENTAL_PREFIX_CACHE=1` only for an explicitly tested worker/model.
+The old first-two-messages/message-count cache selector stays disabled.
+
+The experimental cache owns one temporary snapshot per worker under the configured
+temp directory. It primes all but the final 32 input tokens for inputs of at least
+256 tokens; callback output is suppressed during priming. Reuse requires a strictly
+shorter, exact token prefix. The complete token input is submitted after loading;
+history remains disabled. Loaded snapshots are explicitly released and the entire
+native KV state cleared before each request. A changed prefix replaces the slot.
+Normal unload removes its temporary directory; forced process/host termination can
+leave an orphaned temp directory, which is not an artifact to include in backups.
+Snapshots above 1 GiB disable further caching for that handle; unsupported saving
+also disables it instead of repeatedly doubling work. Cleanup failure taints the
+worker and makes it exit rather than accept another request.
+
+Native usage includes priming work as well as the visible generation. On cache
+hits, native prefill counters measure newly processed tokens, not the entire
+client transcript; they are performance counters, not billing-grade context counts.
+A one-token suffix can be accounted under decode with zero reported prefill tokens.
+No cache filename or conversation identity is accepted from clients.
+
+## Post-generation validation
+
+OpenAI JSON Schema, required/named tool selection, and strict tool definitions
+activate a buffered, two-attempt validation adapter. Successful responses satisfy
+the supported schema/tool contract; otherwise it returns HTTP 502 with
+`output_validation_failed`. Native errors are propagated without further retries.
+Headers `X-RKLLama-Validation: post-generation` and `X-RKLLama-Attempts` identify the
+mode and attempts. Usage sums actual native counters for consumed candidates; a
+later native error retains known usage and marks `usage_incomplete: true` without
+inventing failed-attempt counters. Tools are never executed by the adapter.
+
+JSON Schema support is intentionally restricted to bounded object/array/scalar
+trees, enum/const, basic numeric/string/collection bounds and annotations. References,
+regular expressions, format assertions, combinators, unevaluated constraints and
+uniqueness constraints are rejected before inference. Tool parameter schemas retain
+the documented narrower tool-parser subset. Duplicate JSON keys are rejected at
+the first tool-decoding boundary. The raw candidate is retained request-locally for
+validation so rejected tool attempts cannot become successful optional-tool prose.
+
+Validated SSE is buffered until success, not incremental native-token streaming.
+Retries add real latency and can hit the unchanged context limit after repair
+instructions are appended. Combining schema output with tools is unsupported.
 
 ## Reproducible experimental settings
 

@@ -941,6 +941,11 @@ def strtobool (val):
         raise ValueError("invalid truth value %r" % (val,))
     
 ################################## Tool Calls #####################################
+from .request_options import strict_json
+
+def looks_like_tool_attempt(text):
+    return any(x in text for x in ("<tool_call","</tool_call","<function=","<parameter=")) or (re.search(r'"name"\s*:',text) is not None and re.search(r'"(?:arguments|parameters)"\s*:',text) is not None)
+
 def RawJSONDecoder(index):
     class _RawJSONDecoder(json.JSONDecoder):
         end = None
@@ -953,10 +958,12 @@ def RawJSONDecoder(index):
 def extract_json_tools_from_text(s, index=0):
     while (index := s.find('{', index)) != -1:
         try:
-            yield json.loads(s, cls=(decoder := RawJSONDecoder(index)))
+            yield strict_json(s, cls=(decoder := RawJSONDecoder(index)))
             index = decoder.end
         except json.JSONDecodeError:
             index += 1
+        except ValueError:
+            raise
 
 
 def get_tool_calls_generic(response):
@@ -1009,7 +1016,10 @@ def get_tool_calls_generic(response):
     logger.debug(f"Searching tools with generic method: get_tool_calls_generic")
 
     # Get all the json objects
-    json_tool_list = list(extract_json_tools_from_text(response))
+    try:
+        json_tool_list = list(extract_json_tools_from_text(response))
+    except ValueError:
+        return []
 
     # Set the required keys in json object to identify tool calls
     required_keys_for_tools_option1 = set(["name", "arguments"]) # Other like Qwen
@@ -1072,8 +1082,8 @@ def _parse_qwen_xml_tool_call(body, definitions=None):
         kind = schema.get(key, {}).get("type", "string")
         if kind != "string":
             try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
+                value = strict_json(value)
+            except (ValueError,TypeError):
                 return None
             expected = {"integer": int, "number": (int, float), "boolean": bool, "array": list, "object": dict, "null": type(None)}
             if kind not in expected or not isinstance(value, expected[kind]):

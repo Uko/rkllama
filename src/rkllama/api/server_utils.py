@@ -8,7 +8,7 @@ import os
 import re  # Add import for regex used in JSON extraction
 import rkllama.api.variables as variables
 from transformers import AutoTokenizer
-from flask import jsonify, Response, stream_with_context
+from flask import jsonify, Response, stream_with_context, g, has_request_context
 from .format_utils import create_format_instruction, validate_format_response, get_tool_calls, handle_ollama_response, handle_ollama_embedding_response, get_base64_image_from_pil, get_url_image_from_pil
 from .model_utils import get_property_modelfile
 from .request_options import validate_context_budget
@@ -513,6 +513,8 @@ class ChatEndpointHandler(EndpointHandler):
         metrics["eval"] = eval
         
         format_data = None
+        if has_request_context() and getattr(g,"rkllama_validation_active",False):
+            g.rkllama_raw_candidate=complete_text
         tool_calls = get_tool_calls(complete_text, tools) if tools else None
         if format_spec and complete_text and not tool_calls:
             success, parsed_data, error, cleaned_json = validate_format_response(complete_text, format_spec)
