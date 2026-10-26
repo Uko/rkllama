@@ -222,7 +222,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
     _set_parent_death_signal()
 
     # Initialize individual callback for each worker to prevent error from RKLLM
-    from .callback import callback_impl, global_text, last_embeddings, global_metrics
+    from .callback import callback_impl, global_text, last_embeddings, global_metrics, reset_callback_state
     from .rkllm import RKLLM
 
     # Connect the callback function between Python and C++ independently for each worker
@@ -233,7 +233,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
         model_rkllm = RKLLM(callback, model_path, model_dir, options, lora_model_path, prompt_cache_path, base_domain_id)
     
         # Announce the creation of the RKLLM model failed
-        result_queue.put(WORKER_TASK_FINISHED)
+        result_queue.put({"status": WORKER_TASK_FINISHED, "context_tokens": int(model_rkllm.rkllm_param.max_context_len)})
 
 
     except Exception as e:
@@ -270,8 +270,16 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
 
             elif task == WORKER_TASK_INFERENCE:
                 logger.info(f"Running inference for model {name}...")
-                # Run inference
-                thread_model = threading.Thread(target=model_rkllm.run, args=(inference_mode, model_input_type, model_input, options))
+                reset_callback_state()
+                native_failure = []
+                def execute_inference():
+                    try:
+                        result = model_rkllm.run(inference_mode, model_input_type, model_input, options)
+                        if result not in (None, 0):
+                            native_failure.append("Native runtime returned an error")
+                    except Exception as exc:
+                        native_failure.append(type(exc).__name__)
+                thread_model = threading.Thread(target=execute_inference)
                 thread_model.start()
                 
                 # Looping until execution of the thread
@@ -302,7 +310,15 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                     # Abort the current inference of the model
                     logger.info(f"Aborting inference for model {name}...")
                     model_rkllm.abort()
+                    thread_model.join(timeout=30)
+                    if thread_model.is_alive():
+                        # Do not let another task overlap a still-running native
+                        # call. Exit the worker so the parent reaps/reloads it.
+                        raise SystemExit("Native abort did not stop inference")
                     model_rkllm.clear_cache()
+                    reset_callback_state()
+                    child_conn.send({"error": {"type": "server_error", "code": "inference_aborted", "message": "Inference was aborted"}})
+                    child_conn.close()
                     # Reset the flag
                     abort_flag.value = False
                     # Empty stats
@@ -310,15 +326,25 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                     token_count=0
                     prompt_eval=0
                     eval=0
+                    continue
                 else:
-                    # Get the metricts of the inference
+                    # The native thread may append its last tokens after the
+                    # loop's drain but before join observes completion. Deliver
+                    # them now, before FINISHED, never in the next request.
+                    while global_text:
+                        child_conn.send(global_text.pop(0))
+                    if native_failure or len(global_metrics) != 4:
+                        raise RuntimeError("Native inference failed without valid completion metrics")
+                    # Get the metrics of the inference
                     prompt_token_count = global_metrics[0]
                     token_count = global_metrics[1]
                     prompt_eval = global_metrics[2] * 1000000  if global_metrics[2] is not None else 0
                     eval = global_metrics[3] * 1000000 if global_metrics[3] is not None else 0
                 
                 # Send final signal of the inference
-                child_conn.send((WORKER_TASK_FINISHED,prompt_token_count, token_count, prompt_eval, eval))   
+                limit = int((options or {}).get("max_new_tokens", rkllama.config.get("model", "default_max_new_tokens")))
+                finish = "length" if token_count >= limit else "stop"
+                child_conn.send((WORKER_TASK_FINISHED,prompt_token_count, token_count, prompt_eval, eval, finish))
 
                 # Close the connection
                 child_conn.close()
@@ -364,7 +390,12 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
 
         except Exception as e:
             logger.error(f"Failed executing task the worker for model '{name}': {str(e)}")
-            child_conn.send(WORKER_TASK_ERROR)
+            if task == WORKER_TASK_INFERENCE and thread_model.is_alive():
+                model_rkllm.abort()
+                thread_model.join(timeout=30)
+                if thread_model.is_alive():
+                    raise SystemExit("Failed inference did not stop")
+            child_conn.send({"error": {"type": "server_error", "code": "native_inference_error", "message": "Native inference failed"}})
 
             # Close the connection
             child_conn.close()
@@ -1522,6 +1553,7 @@ class Worker:
     def __init__(self, model_name, base_domain_id, loaded_by=None):
         self.worker_model_info = WorkerModelInfo(model_name=model_name, base_domain_id=base_domain_id, loaded_by=loaded_by)
         self.process = None
+        self.native_context_tokens = None
         self.task_queue = Queue()
         self.abort_flag = Value('b', False)
 
@@ -1590,6 +1622,9 @@ class Worker:
                 self.process.terminate()
                 return False
                 
+            if isinstance(creation_status, dict):
+                self.native_context_tokens = creation_status["context_tokens"]
+                creation_status = creation_status["status"]
             if creation_status == WORKER_TASK_ERROR:
                 result_queue.close()
                 self.process.terminate()

@@ -312,7 +312,7 @@ class RKLLM(object):
 
         # Run the RKLLM model with the input
         logger.debug(f"Executing rkllm inference...")
-        self.rkllm_run(self.handle, ctypes.byref(rkllm_input), ctypes.byref(self.rkllm_infer_params), None)
+        return_code = self.rkllm_run(self.handle, ctypes.byref(rkllm_input), ctypes.byref(self.rkllm_infer_params), None)
         logger.debug(f"Finished inference")
 
         # Delete previous old prompt cache if exists
@@ -327,7 +327,7 @@ class RKLLM(object):
         if max_new_tokens is not None:
             self.rkllm_infer_params.max_new_tokens = 0
  
-        return
+        return return_code
 
     def abort(self):
         return self.rkllm_abort(self.handle)

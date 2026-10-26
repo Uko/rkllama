@@ -63,6 +63,49 @@ def validate_legacy_format(value):
         raise RequestOptionError("format", "required must name declared properties")
 
 
+def validate_tool_schema(schema, param):
+    """Reject schema shapes the tool parser cannot interpret before inference."""
+    if not isinstance(schema, dict):
+        raise RequestOptionError(param, "Tool schema must be an object")
+    allowed = {"type", "properties", "required", "additionalProperties", "items", "description", "title", "enum"}
+    kind = schema.get("type", "object" if "properties" in schema else None)
+    if set(schema) - allowed or (kind is not None and (not isinstance(kind, str) or kind not in {"string", "integer", "number", "boolean", "object", "array", "null"})):
+        raise RequestOptionError(param, "Unsupported tool schema keywords or type; union types are unsupported")
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    if not isinstance(properties, dict) or not isinstance(required, list) or any(not isinstance(x, str) for x in required):
+        raise RequestOptionError(param, "properties must be an object and required a string array")
+    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
+        raise RequestOptionError(param, "additionalProperties must be boolean")
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
+        raise RequestOptionError(param, "enum must be a nonempty array")
+    for key, value in properties.items():
+        validate_tool_schema(value, param + ".properties." + key)
+    if "items" in schema:
+        validate_tool_schema(schema["items"], param + ".items")
+
+
+def tool_value_matches(value, schema):
+    kind = schema.get("type", "object" if "properties" in schema else None)
+    types = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict, "array": list, "null": type(None)}
+    if kind and (not isinstance(value, types[kind]) or (kind in ("number", "integer") and isinstance(value, bool))):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        if any(key not in value for key in schema.get("required", [])):
+            return False
+        if schema.get("additionalProperties") is False and set(value) - set(props):
+            return False
+        return all(tool_value_matches(v, props[k]) for k, v in value.items() if k in props)
+    if isinstance(value, list) and "items" in schema:
+        return all(tool_value_matches(v, schema["items"]) for v in value)
+    return True
+
+
 def validate_request_options(payload, *, openai=False, chat=True):
     """Return a private normalized payload; never silently drop client settings."""
     if not isinstance(payload, dict):
@@ -71,7 +114,9 @@ def validate_request_options(payload, *, openai=False, chat=True):
               "enable_thinking", "think", "images"}
     allowed = common | ({"messages", "tools"} if chat else {"prompt"})
     if openai:
-        allowed |= SAMPLING_OPTIONS | TOKEN_ALIASES.keys() | {"n"}
+        allowed |= SAMPLING_OPTIONS | TOKEN_ALIASES.keys() | {"n", "stream_options"}
+        if chat:
+            allowed.add("tool_choice")
     for key in payload:
         if key not in allowed:
             raise RequestOptionError(key, "Unsupported RKLLM request field")
@@ -80,6 +125,35 @@ def validate_request_options(payload, *, openai=False, chat=True):
     if "n" in payload and (type(payload["n"]) is not int or payload["n"] != 1):
         raise RequestOptionError("n", "Only one completion (n=1) is supported")
     result = copy.deepcopy(payload)
+    if "stream_options" in payload:
+        stream_options = payload["stream_options"]
+        if payload.get("stream") is not True:
+            raise RequestOptionError("stream_options", "stream_options requires stream=true")
+        if not isinstance(stream_options, dict):
+            raise RequestOptionError("stream_options", "stream_options must be an object")
+        for key, value in stream_options.items():
+            if key != "include_usage" or not isinstance(value, bool):
+                raise RequestOptionError("stream_options." + key, "Only boolean include_usage is supported")
+    if "tool_choice" in payload:
+        choice = payload["tool_choice"]
+        if choice not in ("auto", "none"):
+            raise RequestOptionError("tool_choice", "Forced tool selection is unsupported; use auto or none")
+        if choice == "none":
+            result.pop("tools", None)
+        result.pop("tool_choice", None)
+    if "tools" in result:
+        tools = result["tools"]
+        if not isinstance(tools, list):
+            raise RequestOptionError("tools", "tools must be an array")
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, dict) or tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+                raise RequestOptionError("tools", "Only function tool definitions are supported")
+            function = tool["function"]
+            if not isinstance(function.get("name"), str) or not function["name"]:
+                raise RequestOptionError("tools", "Each function requires a nonempty name")
+            if "strict" in function and function["strict"] is not False:
+                raise RequestOptionError(f"tools.{index}.function.strict", "strict tool schemas are unsupported")
+            validate_tool_schema(function.get("parameters", {"type": "object"}), f"tools.{index}.function.parameters")
     options = validate_sampling_options(payload.get("options", {}))
     if openai:
         top = {key: payload[key] for key in payload if key in SAMPLING_OPTIONS or key in TOKEN_ALIASES}
@@ -102,9 +176,21 @@ def validate_request_options(payload, *, openai=False, chat=True):
 class RequestOptionError(ValueError):
     """An unsupported, conflicting, or invalid client option."""
 
-    def __init__(self, param, message):
+    def __init__(self, param, message, code="invalid_request_option"):
         self.param = param
+        self.code = code
         super().__init__(message)
+
+
+def validate_context_budget(prompt_tokens, output_tokens, context_tokens, param):
+    """Reserve the requested output budget before dispatching token input."""
+    if prompt_tokens + output_tokens > context_tokens:
+        raise RequestOptionError(
+            param,
+            f"Prompt has {prompt_tokens} tokens and reserves {output_tokens} output tokens; "
+            f"the configured context limit is {context_tokens} tokens. Shorten the prompt or reduce the output limit.",
+            code="context_length_exceeded",
+        )
 
 
 def normalize_thinking(payload):

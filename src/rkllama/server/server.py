@@ -27,7 +27,7 @@ from rkllama.api.request_options import RequestOptionError, validate_request_opt
 
 def request_option_error(error):
     return jsonify({"error": {"type": "invalid_request_error",
-                              "param": error.param, "message": str(error)}}), 400
+                              "param": error.param, "message": str(error), "code": error.code}}), 400
 
 
 # Import the config module
@@ -1101,7 +1101,8 @@ def generate_ollama():
             options=options,
             enable_thinking=enable_thinking,
             is_openai_request=is_openai_request,
-            images=images
+            images=images,
+            stream_options=data.get('stream_options'),
         )
     except RequestOptionError as e:
         return request_option_error(e)
@@ -1221,7 +1222,8 @@ def chat_ollama():
               tools=tools,
               enable_thinking=enable_thinking,
               is_openai_request=is_openai_request,
-              images=images)
+              images=images,
+              stream_options=data.get('stream_options'))
 
     except RequestOptionError as e:
         return request_option_error(e)

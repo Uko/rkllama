@@ -10,6 +10,16 @@ last_embeddings = []
 global_metrics = []
 
 
+def reset_callback_state():
+    """Start each inference with empty buffers, including partial UTF-8 bytes."""
+    global split_byte_data, global_status
+    global_text.clear()
+    global_metrics.clear()
+    last_embeddings.clear()
+    split_byte_data = b""
+    global_status = -1
+
+
 # Definir la fonction de rappel
 def callback_impl(result, userdata, status):
     global split_byte_data, global_status, global_text, last_embeddings, global_metrics

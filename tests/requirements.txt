@@ -10,3 +10,4 @@ requests>=2.31,<3
 pydantic>=2,<3
 python-dotenv>=1,<2
 huggingface_hub>=0.35,<3
+psutil>=5.9,<8

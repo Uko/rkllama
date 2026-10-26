@@ -23,7 +23,7 @@ with patch("ctypes.CDLL", return_value=Mock()):
     import rkllama.api.classes
 
 worker = types.ModuleType("rkllama.api.worker")
-worker.WorkerManager = Mock
+worker.WorkerManager = lambda *args, **kwargs: Mock(workers={})
 sys.modules[worker.__name__] = worker
 
 process = types.ModuleType("rkllama.api.process")
