@@ -67,6 +67,13 @@ leave an orphaned temp directory, which is not an artifact to include in backups
 Snapshots above 1 GiB disable further caching for that handle; unsupported saving
 also disables it instead of repeatedly doubling work. Cleanup failure taints the
 worker and makes it exit rather than accept another request.
+Routine post-request KV cleanup retains the owned disk snapshot; explicit clears,
+abort cleanup and unload invalidate it. Native cached prefill may not honor an
+immediate abort. Cancellation prevents further stages, retries abort, and waits
+up to 300 seconds for a cache-enabled call (30 seconds otherwise). If the native
+thread still cannot stop, the worker process exits without unsafe handle cleanup
+or waiting indefinitely for non-daemon threads. This can leave an orphaned temp
+directory; cache mode remains experimental and disabled by default.
 
 Native usage includes priming work as well as the visible generation. On cache
 hits, native prefill counters measure newly processed tokens, not the entire

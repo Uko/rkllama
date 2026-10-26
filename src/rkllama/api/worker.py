@@ -217,14 +217,22 @@ def run_translation_generator(model_runtime, model_input):
     
 
 # RKLLM Worker 
-def abort_and_join(model,thread,timeout=30):
-    """Cover native-entry races by retrying abort until the wrapper is quiescent."""
+def abort_and_join(model,thread,timeout=None):
+    """Join before reuse; cached native prefill may not be interruptible."""
+    if timeout is None:
+        timeout=300 if getattr(model,"prefix_cache",None) else 30
     deadline=time.monotonic()+timeout
     while thread.is_alive():
         model.abort()
         thread.join(timeout=min(0.1,max(0,deadline-time.monotonic())))
         if time.monotonic()>=deadline:return not thread.is_alive()
     return True
+
+
+def terminate_unquiescent_worker():
+    # SystemExit waits for non-daemon native threads. Only process exit guarantees
+    # that a hung runtime cannot outlive the pipe or overlap a replacement worker.
+    os._exit(1)
 
 
 def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, model_dir, options=None, lora_model_path = None, prompt_cache_path = None, base_domain_id = 0):
@@ -327,7 +335,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                     if not abort_and_join(model_rkllm,thread_model):
                         # Do not let another task overlap a still-running native
                         # call. Exit the worker so the parent reaps/reloads it.
-                        raise SystemExit("Native abort did not stop inference")
+                        terminate_unquiescent_worker()
                     model_rkllm.clear_cache()
                     reset_callback_state()
                     child_conn.send({"error": {"type": "server_error", "code": "inference_aborted", "message": "Inference was aborted"}})
@@ -421,7 +429,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
             if task == WORKER_TASK_INFERENCE and thread_model.is_alive():
                 abort_flag.value=True
                 if not abort_and_join(model_rkllm,thread_model):
-                    raise SystemExit("Failed inference did not stop")
+                    terminate_unquiescent_worker()
                 abort_flag.value=False
             child_conn.send({"error": {"type": "server_error", "code": "native_inference_error", "message": "Native inference failed"}})
 

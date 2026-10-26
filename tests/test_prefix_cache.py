@@ -164,3 +164,25 @@ def test_post_inference_clear_releases_state_without_deleting_snapshot():
  assert model.clear_cache(preserve_prefix=True)==0
  model.prefix_cache._release_clear.assert_called_once();model.prefix_cache.invalidate.assert_not_called()
  model.clear_cache();model.prefix_cache.invalidate.assert_called_once()
+
+
+def test_cache_abort_waits_for_noninterruptible_prefill_to_quiesce():
+ from test_native_review_regressions import load_worker
+ from unittest.mock import patch as mock_patch
+ worker=load_worker();model=SimpleNamespace(abort=Mock(),prefix_cache=object());state={'joins':0,'alive':True}
+ def join(timeout):
+  state['joins']+=1
+  if state['joins']==2:state['alive']=False
+ thread=SimpleNamespace(is_alive=lambda:state['alive'],join=join)
+ with mock_patch.object(worker.time,'monotonic',side_effect=[0,0,40,40,40]):
+  assert worker.abort_and_join(model,thread)
+ assert state['joins']==2
+
+
+def test_unquiescent_worker_exits_without_waiting_on_native_threads():
+ from test_native_review_regressions import load_worker
+ from unittest.mock import patch as mock_patch
+ worker=load_worker()
+ with mock_patch.object(worker.os,'_exit',side_effect=SystemExit) as exit_process:
+  with pytest.raises(SystemExit):worker.terminate_unquiescent_worker()
+ exit_process.assert_called_once_with(1)
