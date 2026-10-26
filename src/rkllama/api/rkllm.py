@@ -365,9 +365,10 @@ class RKLLM(object):
     def abort(self):
         return self.rkllm_abort(self.handle)
     
-    def clear_cache(self):
+    def clear_cache(self,preserve_prefix=False):
         if getattr(self,"prefix_cache",None):
-            self.prefix_cache.invalidate()
+            if preserve_prefix:self.prefix_cache._release_clear()
+            else:self.prefix_cache.invalidate()
             return 0
         return self.rkllm_clear_kv_cache(self.handle, 1, None, None)
 

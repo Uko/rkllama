@@ -278,8 +278,9 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
 
             elif task == WORKER_TASK_CLEAR_CACHE:
                 logger.info(f"Clearing KV cache for model {name}...")
-                # CLear the cache of the model
-                model_rkllm.clear_cache()
+                # Ordinary post-request memory cleanup retains the exact owned
+                # disk snapshot; explicit clears and aborts invalidate it.
+                model_rkllm.clear_cache(preserve_prefix=bool(model_input))
 
             elif task == WORKER_TASK_INFERENCE:
                 logger.info(f"Running inference for model {name}...")
@@ -1223,7 +1224,7 @@ class WorkerManager:
             self.stop_worker(model_name)
 
 
-    def clear_cache_worker(self, model_name):
+    def clear_cache_worker(self, model_name, preserve_prefix=False):
         """
         Clear the KV chache of a model worker
         
@@ -1233,7 +1234,7 @@ class WorkerManager:
         """
         if model_name in self.workers.keys():
             # Send the abort task of the model if currently is running some inference
-            self.workers[model_name].task_queue.put((None, WORKER_TASK_CLEAR_CACHE,None,None,None,None))
+            self.workers[model_name].task_queue.put((None, WORKER_TASK_CLEAR_CACHE,None,None,preserve_prefix,None))
             
 
 
@@ -1255,9 +1256,9 @@ class WorkerManager:
             
             # Send the inference task
             parent_conn = self.send_task(model_name, (WORKER_TASK_INFERENCE,RKLLMInferMode.RKLLM_INFER_GENERATE, RKLLMInputType.RKLLM_INPUT_TOKEN, model_input, options))
-            
-            # Clear the cache to save memory. Load Prompt caching file is enable before the new inference
-            self.clear_cache_worker(model_name)
+
+            # Release native state without discarding the exact owned snapshot.
+            self.clear_cache_worker(model_name,preserve_prefix=True)
 
             # Return the request parent pipe connection
             return parent_conn

@@ -144,3 +144,23 @@ def test_cancellation_at_load_transition_blocks_visible_native_call(tmp_path):
  callback.reset_callback_state();assert cache.invoke(0,1,(list(range(300)),None),{})==-1
  assert len(model.calls)==1 and not cache.prefix
  cache.close();callback.reset_callback_state()
+
+
+def test_normal_inference_cleanup_preserves_the_owned_prefix_slot():
+ from test_native_review_regressions import load_worker
+ from queue import Queue
+ worker=load_worker();manager=worker.WorkerManager.__new__(worker.WorkerManager)
+ queue=Queue();manager.workers={'test':SimpleNamespace(task_queue=queue)}
+ manager.send_task=Mock(return_value='pipe')
+ assert manager.inference('test',[1,2],None,{})=='pipe'
+ task=queue.get_nowait()
+ assert task[1]==worker.WORKER_TASK_CLEAR_CACHE and task[4] is True
+
+
+def test_post_inference_clear_releases_state_without_deleting_snapshot():
+ from rkllama.api.rkllm import RKLLM
+ model=RKLLM.__new__(RKLLM)
+ model.prefix_cache=SimpleNamespace(_release_clear=Mock(),invalidate=Mock())
+ assert model.clear_cache(preserve_prefix=True)==0
+ model.prefix_cache._release_clear.assert_called_once();model.prefix_cache.invalidate.assert_not_called()
+ model.clear_cache();model.prefix_cache.invalidate.assert_called_once()
