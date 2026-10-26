@@ -42,8 +42,11 @@ Abort joins the inference thread before clearing/resetting shared state. If the
 thread cannot be stopped within the bounded join, the worker exits rather than
 accepting overlapping inference. Native errors and timeouts are errors, not text
 answers or successful zero-usage completion events. Token-limit exhaustion is
-conservatively reported as `length` from the native generated-token count; the
-SDK does not expose a separate finish-reason field in these callback metrics.
+conservatively reported as `length` from generation callbacks as well as native
+performance counters: the SDK's performance count can be one lower than the
+normal generation-callback count.
+Usage remains the SDK-reported counters; it is not silently inflated to match
+callback counts. The SDK does not expose a separate finish-reason field here.
 Capacity checks use the context size reported by the loaded native worker, not
 an edited Modelfile that has not yet been reloaded.
 

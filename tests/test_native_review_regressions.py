@@ -105,3 +105,25 @@ def test_nonstream_openai_conversion_keeps_length_reason():
     from rkllama.api.format_utils import ollama_chat_to_openai_v1_chat_completion
     result = ollama_chat_to_openai_v1_chat_completion({"done": True, "done_reason": "length", "message": {"role": "assistant", "content": "1"}})
     assert result["choices"][0]["finish_reason"] == "length"
+
+def test_decode_limit_counts_first_token_even_if_sdk_perf_omits_it(monkeypatch):
+    from rkllama.api import callback, rkllm
+    worker = load_worker()
+    sent = []
+    connection = SimpleNamespace(send=sent.append, close=lambda: None)
+    model = Mock()
+    model.rkllm_param = SimpleNamespace(max_context_len=8192)
+    monkeypatch.setattr(rkllm, "RKLLM", lambda *a: model)
+    class FinishedThread:
+        def __init__(self, **kwargs): pass
+        def start(self): pass
+        def join(self, **kwargs):
+            callback.global_metrics[:] = [85, 95, 10, 100]
+            callback.global_generation_steps = 96
+        def is_alive(self): return False
+    monkeypatch.setattr(worker.threading, "Thread", FinishedThread)
+    tasks = Queue()
+    tasks.put((connection, worker.WORKER_TASK_INFERENCE, 0, 1, ([1], None), {"max_new_tokens": 96}))
+    tasks.put((connection, worker.WORKER_TASK_UNLOAD_MODEL, 0, 1, None, {}))
+    worker.run_rkllm_worker("test", tasks, Queue(), SimpleNamespace(value=False), "/model", "/test")
+    assert sent[-1][-1] == "length"

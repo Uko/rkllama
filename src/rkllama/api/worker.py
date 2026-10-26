@@ -224,6 +224,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
     # Initialize individual callback for each worker to prevent error from RKLLM
     from .callback import callback_impl, global_text, last_embeddings, global_metrics, reset_callback_state
     from .rkllm import RKLLM
+    from . import callback as callback_state
 
     # Connect the callback function between Python and C++ independently for each worker
     callback = LLMResultCallback_type(callback_impl)
@@ -343,7 +344,7 @@ def run_rkllm_worker(name, task_queue, result_queue, abort_flag, model_path, mod
                 
                 # Send final signal of the inference
                 limit = int((options or {}).get("max_new_tokens", rkllama.config.get("model", "default_max_new_tokens")))
-                finish = "length" if token_count >= limit else "stop"
+                finish = "length" if max(token_count, callback_state.global_generation_steps) >= limit else "stop"
                 child_conn.send((WORKER_TASK_FINISHED,prompt_token_count, token_count, prompt_eval, eval, finish))
 
                 # Close the connection
